@@ -17,10 +17,11 @@
   with_items:
       - rng-tools
       - firewalld
+      - screen
 
-- name: Add second ethernet interface
-  command: nmcli connection  add type ethernet ifname eth1  con-name ethernet-eth1
-  when: not ansible_eth1.ipv4 is defined
+# - name: Add second ethernet interface
+#   command: nmcli connection  add type ethernet ifname eth1  con-name ethernet-eth1
+#   when: not ansible_eth1.ipv4 is defined
 
 - name: enable firewalld
   command: systemctl enable firewalld.service
@@ -41,10 +42,6 @@
 
 - name: Start the rngd service
   service: name=rngd enabled=yes state=started
-
-- name: Add second ethernet interface
-  command: nmcli connection  add type ethernet ifname eth1  con-name ethernet-eth1
-  when: not ansible_eth1.ipv4 is defined
 
 - name: Set up authorized_keys for the deploy user
   authorized_key: user="{{ ansible_user_id }}"

@@ -31,7 +31,7 @@
         state=link
 
 - name: Copy answer file
-  template: src=answers.txt.j2
+  template: src=answers.txt.autoregister-neutron
             dest=/answers.txt
   register: answers
 

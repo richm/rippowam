@@ -29,6 +29,7 @@
 - name: role on demo project
   command: openstack role add  --project demo --group ipausers Member
   environment: os_env
+  when: packstack_demo
 
 - name: list idps
   command: openstack identity provider list -c ID -f csv

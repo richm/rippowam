@@ -1,0 +1,15 @@
+DEVICE="eth0"
+BOOTPROTO="static"
+DHCPCLASS=
+HWADDR={{ ansible_eth0.macaddress }}
+IPADDR={{ ansible_eth0.ipv4.address }}
+NETMASK=255.255.255.0
+GATEWAY={{ ansible_eth0.ipv4.address.rsplit(".", 1)[0] + '.1' }}
+ONBOOT=yes
+NM_CONTROLLED=no
+TYPE="Ethernet"
+USERCTL="yes"
+PEERDNS="yes"
+DNS1={{ nameserver }}
+DNS2={{ ipa_forwarder }}
+IPV6INIT="no"

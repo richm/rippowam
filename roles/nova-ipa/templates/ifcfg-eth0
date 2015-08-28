@@ -1,0 +1,7 @@
+DEVICE=eth0
+HWADDR={{ ansible_eth0.macaddress }}
+TYPE=OVSPort
+DEVICETYPE=ovs
+OVS_BRIDGE=br-ex
+ONBOOT=yes
+NM_CONTROLLED=no

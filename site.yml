@@ -24,6 +24,7 @@
     - ipaclient
     - packstack
     - kerbmaria
+    - nova-ipa
   vars:
     hostname: "{{ ansible_fqdn }}"
     nightly_version: 20150817.n.2
@@ -34,3 +35,4 @@
     #ipa_realm: Set By Inventory
     #ipa_domain: Set By Inventory
     ipa_admin_password: "{{ipa_admin_user_password }}"
+    packstack_demo: true

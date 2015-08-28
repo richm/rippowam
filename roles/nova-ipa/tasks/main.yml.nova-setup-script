@@ -1,0 +1,117 @@
+---
+- name: set password for cloud-user in case network is b0rked
+  user: name=cloud-user password='$6$ndP/VMmA8.yDNiQI$cee4x3Qe1O5foUWdgwukRuy.Wetc9vop9o43C.PPKZS1liuFMr6Ezm.vtW8O9ruuKfJXionr7.oQ0UEeNwKdO.'
+
+# This is only needed for persistence across reboot or network restart
+# - name: Configure br-ex for Neutron networking
+#   template: src=ifcfg-br-ex
+#             dest=/etc/sysconfig/network-scripts/ifcfg-br-ex
+
+# - name: Configure eth0 for Neutron networking
+#   template: src=ifcfg-eth0
+#             dest=/etc/sysconfig/network-scripts/ifcfg-eth0
+
+# Kernel IP routing table
+# Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
+# default         192.168.52.1    0.0.0.0         UG    100    0        0 eth0
+# default         192.168.178.1   0.0.0.0         UG    101    0        0 eth1
+# 192.168.52.0    0.0.0.0         255.255.255.0   U     100    0        0 eth0
+# 192.168.178.0   0.0.0.0         255.255.255.0   U     100    0        0 eth1
+
+- name: Install IPA Nova hooks plugin
+  copy: src=novahooks.py
+        dest=/usr/lib/python2.7/site-packages/ipaclient/novahooks.py
+
+- name: Install IPA client config for Nova hooks
+  template: src=ipaclient.conf dest=/etc/nova/ipaclient.conf
+            owner=nova group=nova mode=0600
+
+- name: Install IPA client setup script for VM
+  copy: src=setup-ipa-client.sh dest=/etc/nova/setup-ipa-client.sh
+        owner=nova group=nova mode=0755
+
+- name: Install Nova cloud-config for IPA client setup script for VM
+  copy: src=cloud-config.json dest=/etc/nova/cloud-config.json
+        owner=nova group=nova mode=0600
+
+- name: Configure Nova vendordata jsonfile
+  ini_file: dest=/etc/nova/nova.conf section=DEFAULT
+            option=vendordata_jsonfile_path
+            value=/etc/nova/cloud-config.json
+
+- name: Configure Nova IPA build instance hook
+  ini_file: dest=/usr/lib/python2.7/site-packages/nova-2015.1.0-py2.7.egg-info/entry_points.txt
+            section=nova.hooks option=build_instance
+            value=ipaclient.novahooks:IPABuildInstanceHook
+
+- name: Configure Nova IPA delete instance hook
+  ini_file: dest=/usr/lib/python2.7/site-packages/nova-2015.1.0-py2.7.egg-info/entry_points.txt
+            section=nova.hooks option=delete_instance
+            value=ipaclient.novahooks:IPADeleteInstanceHook
+
+- name: Configure Nova IPA network info hook for floating IP notifications
+  ini_file: dest=/usr/lib/python2.7/site-packages/nova-2015.1.0-py2.7.egg-info/entry_points.txt
+            section=nova.hooks option=instance_network_info
+            value=ipaclient.novahooks:IPANetworkInfoHook
+
+- name: Put nova in debug mode
+  ini_file: dest=/etc/nova/nova.conf section=DEFAULT option=debug value=True
+
+- name: Set the DHCP domain for new VMs
+  ini_file: dest=/etc/nova/nova.conf section=DEFAULT option=dhcp_domain value={{ ipa_domain }}
+
+- name: Configure Neutron DHCP agent to use IPA first for DNS for new VMs
+  ini_file: dest=/etc/neutron/dhcp_agent.ini
+            section=DEFAULT option=dnsmasq_dns_servers
+            value={{ nameserver }},{{ ipa_forwarder }}
+
+- name: Configure Neutron with br-ex bridge mapping
+  ini_file: dest=/etc/neutron/plugins/openvswitch/ovs_neutron_plugin.ini
+            section=ovs option=bridge_mappings value=extnet:br-ex
+
+- name: Configure Neutron with ml2 type_drivers vxlan,flat,vlan
+  ini_file: dest=/etc/neutron/plugin.ini
+            section=ml2 option=type_drivers value=vxlan,flat,vlan
+
+- name: Make sure openstack node uses ip forwarding for nested VMs
+  sysctl: name=net.ipv4.ip_forward value=1 state=present
+
+- name: Install setup-iptables
+  copy: src=setup-iptables.sh dest=/tmp/setup-iptables.sh mode=0755
+
+- name: Setup NAT-ing for nested VMs
+  command: /tmp/setup-iptables.sh
+
+- name: Get keytab for IPA Nova client
+  command: >
+    ipa-getkeytab -r
+    -s ipa.{{ ipa_domain }}
+    -D 'cn=directory manager'
+    -w {{ ipa_dm_password }}
+    -p admin@{{ ipa_realm }}
+    -k /etc/nova/ipauser.keytab
+  args:
+    creates: /etc/nova/ipauser.keytab
+
+- name: Change IPA Nova client keytab ownership and mode
+  file: path=/etc/nova/ipauser.keytab
+        mode=0600
+        owner=nova
+        group=nova
+
+- name: list images
+  command: openstack image list -c Name -f csv
+  environment: os_env
+  register: os_images
+  changed_when: false
+
+- name: Get rhel7 image
+  command: openstack image create rhel7 --location http://download.eng.bos.redhat.com/brewroot/packages/rhel-guest-image/7.2/20150821.0/images/rhel-guest-image-7.2-20150821.0.x86_64.qcow2
+  environment: os_env
+  when: '"\"rhel7\"" not in os_images.stdout_lines'
+
+- name: Get our nova-setup.sh script
+  template: src=nova-setup.sh dest=/tmp/nova-setup.sh mode=0755
+
+- name: Do the rest of the Neutron post-install stuff
+  command: /tmp/nova-setup.sh

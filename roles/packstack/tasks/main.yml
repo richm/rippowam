@@ -14,6 +14,7 @@
 - name: install demorc file
   template: src=demorc.j2
             dest=~/demorc
+  when: packstack_demo
 
 - include: infopipe.yml
 - include: keystone.yml

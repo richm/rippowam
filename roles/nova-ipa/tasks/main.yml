@@ -1,0 +1,276 @@
+---
+- name: set password for cloud-user in case network is b0rked
+  user: name=cloud-user password='$6$ndP/VMmA8.yDNiQI$cee4x3Qe1O5foUWdgwukRuy.Wetc9vop9o43C.PPKZS1liuFMr6Ezm.vtW8O9ruuKfJXionr7.oQ0UEeNwKdO.'
+
+# This is only needed for persistence across reboot or network restart
+# - name: Configure br-ex for Neutron networking
+#   template: src=ifcfg-br-ex
+#             dest=/etc/sysconfig/network-scripts/ifcfg-br-ex
+
+# - name: Configure eth0 for Neutron networking
+#   template: src=ifcfg-eth0
+#             dest=/etc/sysconfig/network-scripts/ifcfg-eth0
+
+- name: Install IPA Nova hooks plugin
+  copy: src=novahooks.py
+        dest=/usr/lib/python2.7/site-packages/ipaclient/novahooks.py
+  notify:
+    - restart nova-compute
+
+- name: Install IPA client config for Nova hooks
+  template: src=ipaclient.conf dest=/etc/nova/ipaclient.conf
+            owner=nova group=nova mode=0600
+  notify:
+    - restart nova-compute
+
+- name: Install IPA client setup script for VM
+  copy: src=setup-ipa-client.sh dest=/etc/nova/setup-ipa-client.sh
+        owner=nova group=nova mode=0755
+  notify:
+    - restart nova-compute
+
+- name: Install Nova cloud-config for IPA client setup script for VM
+  copy: src=cloud-config.json dest=/etc/nova/cloud-config.json
+        owner=nova group=nova mode=0600
+  notify:
+    - restart nova-compute
+
+- name: Configure Nova vendordata jsonfile
+  ini_file: dest=/etc/nova/nova.conf section=DEFAULT
+            option=vendordata_jsonfile_path
+            value=/etc/nova/cloud-config.json
+  notify:
+    - restart nova-compute
+
+- name: Configure Nova IPA build instance hook
+  ini_file: dest=/usr/lib/python2.7/site-packages/nova-2015.1.0-py2.7.egg-info/entry_points.txt
+            section=nova.hooks option=build_instance
+            value=ipaclient.novahooks:IPABuildInstanceHook
+  notify:
+    - restart nova-compute
+
+- name: Configure Nova IPA delete instance hook
+  ini_file: dest=/usr/lib/python2.7/site-packages/nova-2015.1.0-py2.7.egg-info/entry_points.txt
+            section=nova.hooks option=delete_instance
+            value=ipaclient.novahooks:IPADeleteInstanceHook
+  notify:
+    - restart nova-compute
+
+- name: Configure Nova IPA network info hook for floating IP notifications
+  ini_file: dest=/usr/lib/python2.7/site-packages/nova-2015.1.0-py2.7.egg-info/entry_points.txt
+            section=nova.hooks option=instance_network_info
+            value=ipaclient.novahooks:IPANetworkInfoHook
+  notify:
+    - restart nova-compute
+
+- name: Put nova in debug mode
+  ini_file: dest=/etc/nova/nova.conf section=DEFAULT option=debug value=True
+  notify:
+    - restart nova-compute
+
+- name: Set the DHCP domain for new VMs
+  ini_file: dest=/etc/nova/nova.conf section=DEFAULT option=dhcp_domain value={{ ipa_domain }}
+  notify:
+    - restart nova-compute
+
+- name: Configure Neutron DHCP agent to use IPA first for DNS for new VMs
+  ini_file: dest=/etc/neutron/dhcp_agent.ini
+            section=DEFAULT option=dnsmasq_dns_servers
+            value={{ nameserver }},{{ ipa_forwarder }}
+  notify:
+    - restart neutron-dhcp-agent
+    - restart neutron-api
+    - restart neutron-metadata-agent
+    - restart neutron-l3-agent
+    - restart neutron-openvswitch-agent
+
+- name: Configure Neutron with br-ex bridge mapping
+  ini_file: dest=/etc/neutron/plugins/openvswitch/ovs_neutron_plugin.ini
+            section=ovs option=bridge_mappings value=extnet:br-ex
+  notify:
+    - restart neutron-dhcp-agent
+    - restart neutron-api
+    - restart neutron-metadata-agent
+    - restart neutron-l3-agent
+    - restart neutron-openvswitch-agent
+
+- name: Configure Neutron with ml2 type_drivers vxlan,flat,vlan
+  ini_file: dest=/etc/neutron/plugin.ini
+            section=ml2 option=type_drivers value=vxlan,flat,vlan
+  notify:
+    - restart neutron-dhcp-agent
+    - restart neutron-api
+    - restart neutron-metadata-agent
+    - restart neutron-l3-agent
+    - restart neutron-openvswitch-agent
+
+- name: Make sure openstack node uses ip forwarding for nested VMs
+  sysctl: name=net.ipv4.ip_forward value=1 state=present
+
+- name: Install setup-iptables
+  copy: src=setup-iptables.sh dest=/tmp/setup-iptables.sh
+        mode=0755
+
+- name: Setup NAT-ing for nested VMs
+  command: >
+    /tmp/setup-iptables.sh
+
+- name: Get keytab for IPA Nova client
+  command: >
+    ipa-getkeytab -r
+    -s ipa.{{ ipa_domain }}
+    -D 'cn=directory manager'
+    -w {{ ipa_dm_password }}
+    -p admin@{{ ipa_realm }}
+    -k /etc/nova/ipauser.keytab
+  args:
+    creates: /etc/nova/ipauser.keytab
+
+- name: Change IPA Nova client keytab ownership and mode
+  file: path=/etc/nova/ipauser.keytab mode=0600 owner=nova group=nova
+  notify:
+    - restart nova-compute
+
+- name: Make sure all servers are bounced before proceeding
+  meta: flush_handlers
+
+# it seems the quantum modules require explicit username, password, project, etc. :-(
+#   quantum_network: name=public provider_network_type=flat provider_physical_network=extnet
+#                    router_external=yes shared=yes state=present
+- name: Create external network using provider network
+  command: neutron net-create public --provider:network_type flat --provider:physical_network extnet --router:external --shared
+  environment: os_env
+
+#   quantum_subnet: state=present network_name=public name=public_subnet
+#                   enable_dhcp=false
+#                   cidr={{ ansible_eth0.ipv4.address + '/24' }}
+#                   gateway_ip={{ ansible_eth0.ipv4.address.rsplit('.', 1)[0] + '.1' }}
+#                   allocation_pool_start={{ ansible_eth0.ipv4.address.rsplit('.', 1)[0] + '.128' }}
+#                   allocation_pool_end={{ ansible_eth0.ipv4.address.rsplit('.', 1)[0] + '.254' }}
+#                   dns_nameservers={{ nameserver }},{{ ipa_forwarder }}
+- name: Create external network subnet for floating ips
+  command: neutron subnet-create --name public_subnet --enable_dhcp=False \
+             --allocation-pool=start={{ ansible_eth0.ipv4.address.rsplit('.', 1)[0] + '.128' }},end={{ ansible_eth0.ipv4.address.rsplit('.', 1)[0] + '.254' }} \
+             --gateway={{ ansible_eth0.ipv4.address.rsplit('.', 1)[0] + '.1' }} \
+             --dns-nameserver {{ nameserver }} --dns-nameserver {{ ipa_forwarder }} \
+             public {{ ansible_eth0.ipv4.address + '/24' }}
+  environment: os_env
+
+#   quantum_subnet: state=present name=router1
+- name: Create external network router
+  command: neutron router-create router1
+  environment: os_env
+
+#   quantum_network: name=private state=present
+- name: Create private network
+  command: neutron net-create private
+  environment: os_env
+
+#   quantum_subnet: state=present network_name=private name=private_subnet
+#                   cidr=10.0.0.0/24
+- name: Create private network subnet
+  command: neutron subnet-create --name private_subnet private 10.0.0.0/24
+  environment: os_env
+
+#   quantum_router_interface: state=present router_name=router1
+#                             subnet_name=private_subnet
+- name: Connect router for internal network
+  command: neutron router-interface-add router1 private_subnet
+  environment: os_env
+
+#   quantum_router_gateway: state=present router_name=router1 network_name=public
+- name: Set gateway for router
+  command: neutron router-gateway-set router1 public
+  environment: os_env
+
+- name: route private network through public network
+  command: ip route replace 10.0.0.0/24 via {{ ansible_eth0.ipv4.address.rsplit('.', 1)[0] + '.128' }}
+
+- name: list security-groups
+  shell: neutron security-group-list | awk '/ default / {print $2}'
+  environment: os_env
+  register: os_security_groups
+  changed_when: false
+
+- name: Add icmp to default security groups
+  command: neutron security-group-rule-create --protocol icmp --direction ingress --remote-ip-prefix 0.0.0.0/0 {{ item }}
+  environment: os_env
+  with_items: os_security_groups.stdout_lines
+
+- name: Add ssh port to default security groups
+  command: neutron security-group-rule-create --protocol tcp --port-range-min 22 --port-range-max 22 --direction ingress {{ item }}
+  environment: os_env
+  with_items: os_security_groups.stdout_lines
+
+- name: list images
+  command: openstack image list -c Name -f csv
+  environment: os_env
+  register: os_images
+  changed_when: false
+
+- name: Get rhel7 image
+  command: openstack image create rhel7 --location http://download.eng.bos.redhat.com/brewroot/packages/rhel-guest-image/7.2/20150821.0/images/rhel-guest-image-7.2-20150821.0.x86_64.qcow2
+  environment: os_env
+  when: '"\"rhel7\"" not in os_images.stdout_lines'
+
+- name: get private network ID
+  shell: openstack network list | awk '/ private / {print $2}'
+  environment: os_env
+  register: private_network_id
+  changed_when: false
+
+- name: create rhel7 vm and get uuid
+  shell: openstack server create rhel7 --flavor m1.small --image rhel7 --security-group default --nic net-id={{ private_network_id }} | awk '/ id / {print $4}'
+  environment: os_env
+  register: vm_uuid
+  changed_when: false
+
+- name: Install wait_for_active_vm script
+  copy: src=wait_for_active_vm.sh dest=/tmp/wait_for_active_vm.sh mode=0755
+
+- name: Install wait_for_ping script
+  copy: src=wait_for_ping.sh dest=/tmp/wait_for_ping.sh mode=0755
+
+- name: wait for vm to be active
+  command: /tmp/wait_for_active_vm.sh rhel7 300
+  changed_when: false
+  environment: os_env
+
+- name: get private ip address of new vm
+  shell: openstack server show rhel7 | sed -n '/ addresses / { s/^.*addresses.*private=\([0-9.][0-9.]*\).*$/\1/; p; q }'
+  environment: os_env
+  register: vm_private_ip
+  changed_when: false
+
+- name: wait for vm to respond to ping on private ip
+  command: /tmp/wait_for_ping.sh {{ vm_private_ip }} 300
+  changed_when: false
+  environment: os_env
+
+- name: get port id of VM private ip
+  shell: neutron port-list --device-id {{ vm_uuid }} | awk '/{{ vm_private_ip }}/ {print $2}'
+  environment: os_env
+  register: vm_port_id
+  changed_when: false
+
+- name: create floatingip
+  shell: neutron floatingip-create public | awk '/ id / {print $4}'
+  environment: os_env
+  register: vm_fip_id
+  changed_when: false
+
+- name: associate floatingip with vm
+  command: neutron floatingip-associate {{ vm_fip_id }} {{ vm_port_id }}
+  environment: os_env
+  changed_when: false
+
+- name: get floating ip address of new vm
+  shell: neutron floatingip-list | awk '/{{ vm_private_ip }}/ {print $6}'
+  environment: os_env
+  register: vm_floating_ip
+  changed_when: false
+
+- name: wait for vm to respond to ping on floating ip
+  command: /tmp/wait_for_ping.sh {{ vm_floating_ip }} 300
+  changed_when: false
+  environment: os_env

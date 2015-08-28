@@ -1,0 +1,5 @@
+NOZEROCONF=yes
+NETWORKING=yes
+NISDOMAIN={{ ipa_domain }}
+HOSTNAME=openstack.{{ ipa_domain }}
+GATEWAY={{ ansible_eth0.ipv4.address.rsplit('.', 1)[0] + '.1' }}
